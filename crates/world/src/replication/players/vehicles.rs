@@ -197,6 +197,40 @@ impl Players {
         self.change_vehicle_horn(id, sounding)
     }
 
+    /// Change chosen component fields of the AI car identified by this lifetime
+    /// key (fork experiment: police lights). Indices follow the car's installed
+    /// profile; every other component stays unchanged.
+    pub fn set_ai_vehicle_fields(
+        &mut self,
+        connection: u8,
+        persona: u64,
+        key: u64,
+        changes: &[(usize, vehicle::Update)],
+    ) -> Result<Option<Record>, Error> {
+        let id = self
+            .ai_ids(connection, persona, key)
+            .ok_or(Error::UnknownObject)?
+            .vehicle;
+        let Some(state::Object {
+            current: Update::Vehicle { binding, fields },
+            ..
+        }) = self.objects.get(id)
+        else {
+            return Err(Error::TypeMismatch);
+        };
+        let mut updates = vec![None; fields.len()];
+        for (index, update) in changes {
+            *updates.get_mut(*index).ok_or(Error::Shape)? = Some(update.clone());
+        }
+        self.objects.change(
+            id,
+            Update::Vehicle {
+                binding: binding.clone(),
+                fields: updates,
+            },
+        )
+    }
+
     fn change_vehicle_horn(&mut self, id: u16, sounding: bool) -> Result<Option<Record>, Error> {
         let Some(state::Object {
             current: Update::Vehicle { binding, fields },

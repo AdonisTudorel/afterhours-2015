@@ -129,6 +129,17 @@ impl Players {
                 Initial::TrafficGoal(g) => {
                     g.allocation_serial = serial;
                 }
+                // Police commands (fork experiment): the target is checked by
+                // the world model like every other goal reference.
+                Initial::ChaseTargetGoal(g) => {
+                    g.allocation_serial = serial;
+                }
+                Initial::FollowTargetGoal(g) => {
+                    g.allocation_serial = serial;
+                }
+                Initial::LookForLawbreakersGoal(g) => {
+                    g.allocation_serial = serial;
+                }
                 _ => return Err(Error::Unsupported),
             }
             let record = next.spawn(initial, update)?;

@@ -19,6 +19,7 @@ use std::{
     sync::Arc,
 };
 
+mod police;
 mod policy;
 pub use policy::{Focus, INNER, OUTER};
 
@@ -68,6 +69,8 @@ pub struct Population {
     owner: Option<(u8, u64)>,
     /// Player-chosen amount, percent of the original traffic (100 default).
     traffic_percent: u16,
+    /// Fork experiment: patrol cars and pursuits.
+    police: police::Police,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -85,6 +88,10 @@ struct Placement {
     persona: usize,
     born: u64,
     pose: vehicle::initialize::Pose,
+    /// The player whose focus created the car (police watch target).
+    watch: Option<u16>,
+    /// A police reinforcement created to chase this player's participant.
+    chase: Option<u16>,
 }
 
 impl Population {
@@ -128,6 +135,7 @@ impl Population {
             clock: 0,
             owner: None,
             traffic_percent: 100,
+            police: police::Police::new(content),
         })
     }
 
@@ -259,6 +267,55 @@ impl Population {
             *count = count.checked_sub(1).ok_or(Error::Shape)?;
             next.authority.remove_group(key);
         }
+        next.police.tick(
+            &mut police::Host {
+                world: &mut world,
+                connection,
+                persona,
+                changes: &mut changes,
+            },
+            &next.cars,
+            focus,
+            now,
+        );
+        // A police reinforcement is created like traffic on a road near the
+        // chased player. Its failure never blocks ambient traffic.
+        if next.cars.len() < MAX_CARS
+            && world.ai_count() < ai::MAX_AI
+            && let Some((target, cop)) = next.police.dispatch(now)
+            && let Some(point) = focus.iter().find(|p| p.id == target)
+        {
+            let query = next.policy.query(point, next.traffic_percent.max(100));
+            if let Some(candidate) =
+                next.policy
+                    .select(&query, point, focus, &next.cars, &next.road_counts, random)
+            {
+                let placement = Placement {
+                    spline: candidate.road,
+                    persona: cop,
+                    born: now,
+                    pose: vehicle::initialize::Pose {
+                        position: candidate.position,
+                        basis: candidate.basis,
+                        origin: [0.; 3],
+                    },
+                    watch: None,
+                    chase: Some(target),
+                };
+                let saved = (next.clone(), world.clone(), changes.clone());
+                if let Err(error) = next.spawn(
+                    &mut world,
+                    connection,
+                    persona,
+                    content,
+                    placement,
+                    &mut changes,
+                ) {
+                    tracing::warn!(?error, "police reinforcement not created");
+                    (next, world, changes) = saved;
+                }
+            }
+        }
         next.timers.retain(|id, _| ids.contains(id));
         for point in focus {
             let timer = next
@@ -302,6 +359,8 @@ impl Population {
                         basis: candidate.basis,
                         origin: [0.; 3],
                     },
+                    watch: Some(point.id),
+                    chase: None,
                 };
                 next.spawn(
                     &mut world,
@@ -431,22 +490,37 @@ impl Population {
             .objects()
             .scene(spline.scene)
             .ok_or(Error::UnknownObject)?;
-        let (goal, assigned) = world.start_ai_traffic_goal(
-            connection,
-            persona,
-            key,
-            traffic::Initial {
-                asset: Asset {
-                    bundle: level.id,
-                    type_id: content.spline_class,
-                    local_index: spline.index,
-                },
-                catalog: Catalog::new(level.id, &[(content.spline_class, spline.catalog_count)])?,
-                allocation_serial: 0,
-                asset_mode: 2,
+        let road = traffic::Initial {
+            asset: Asset {
+                bundle: level.id,
+                type_id: content.spline_class,
+                local_index: spline.index,
             },
-        )?;
-        changes.records.extend([goal, assigned]);
+            catalog: Catalog::new(level.id, &[(content.spline_class, spline.catalog_count)])?,
+            allocation_serial: 0,
+            asset_mode: 2,
+        };
+        let is_cop = self.police.is_police(placement.persona);
+        if is_cop {
+            self.police.register(key, definition.profile.kinds());
+        }
+        let commanded = is_cop
+            && self.police.start(
+                &mut police::Host {
+                    world: &mut *world,
+                    connection,
+                    persona,
+                    changes: &mut *changes,
+                },
+                key,
+                placement.watch,
+                placement.chase,
+                &road,
+            );
+        if !commanded {
+            let (goal, assigned) = world.start_ai_traffic_goal(connection, persona, key, road)?;
+            changes.records.extend([goal, assigned]);
+        }
         changes.spawned = Some(spawned.ids);
         self.next = key.checked_add(1).ok_or(Error::Bound)?;
         self.cars.insert(
